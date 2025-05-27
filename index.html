@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>WASM vs JS Фильтр</title>
+    <style>
+        .container {
+            display: flex;
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .box {
+            border: 1px solid #ccc;
+            padding: 10px;
+            text-align: center;
+        }
+        canvas {
+            max-width: 600px;
+        }
+    </style>
+</head>
+<body>
+    <input type="file" id="imageInput" accept="image/*">
+    <div class="container">
+        <div class="box">
+            <h3>JavaScript</h3>
+            <canvas id="canvasJS"></canvas>
+            <div id="timeJS">Время: -</div>
+        </div>
+        <div class="box">
+            <h3>WebAssembly</h3>
+            <canvas id="canvasWASM"></canvas>
+            <div id="timeWASM">Время: -</div>
+        </div>
+    </div>
+
+    <script src="sepia.js"></script>
+    <script>
+        const canvasJS = document.getElementById('canvasJS');
+        const ctxJS = canvasJS.getContext('2d');
+        const canvasWASM = document.getElementById('canvasWASM');
+        const ctxWASM = canvasWASM.getContext('2d');
+
+        Module.onRuntimeInitialized = function() {
+            console.log('WASM модуль готов!');
+            
+            document.getElementById('imageInput').addEventListener('change', async function(e) {
+                const file = e.target.files[0];
+                if (!file) return;
+
+                try {
+                    const img = await loadImage(file);
+                    initCanvases(img);
+                    
+                    // Обработка JS
+                    const jsResult = await processWithJS(img);
+                    document.getElementById('timeJS').textContent = `JS: ${jsResult.time.toFixed(2)} мс`;
+                    
+                    // Обработка WASM
+                    const wasmResult = await processWithWASM(img);
+                    document.getElementById('timeWASM').textContent = `WASM: ${wasmResult.time.toFixed(2)} мс`;
+                } catch (e) {
+                    console.error('Ошибка:', e);
+                }
+            });
+        };
+
+        function loadImage(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const img = new Image();
+                    img.onload = () => resolve(img);
+                    img.onerror = reject;
+                    img.src = e.target.result;
+                };
+                reader.readAsDataURL(file);
+            });
+        }
+
+        function initCanvases(img) {
+            [canvasJS, canvasWASM].forEach(canvas => {
+                canvas.width = img.width;
+                canvas.height = img.height;
+            });
+            ctxJS.drawImage(img, 0, 0);
+            ctxWASM.drawImage(img, 0, 0);
+        }
+
+        function processWithJS(img) {
+            return new Promise(resolve => {
+                const imageData = ctxJS.getImageData(0, 0, img.width, img.height);
+                const data = new Uint8ClampedArray(imageData.data);
+                
+                const start = performance.now();
+                for (let i = 0; i < data.length; i += 4) {
+                    const r = data[i], g = data[i+1], b = data[i+2];
+                    data[i] = Math.min(0.393*r + 0.769*g + 0.189*b, 255);
+                    data[i+1] = Math.min(0.349*r + 0.686*g + 0.168*b, 255);
+                    data[i+2] = Math.min(0.272*r + 0.534*g + 0.131*b, 255);
+                }
+                
+                ctxJS.putImageData(new ImageData(data, img.width, img.height), 0, 0);
+                resolve({ time: performance.now() - start });
+            });
+        }
+
+        async function processWithWASM(img) {
+            const imageData = ctxWASM.getImageData(0, 0, img.width, img.height);
+            const buffer = Module._malloc(imageData.data.length);
+            
+            try {
+                Module.HEAPU8.set(imageData.data, buffer);
+                
+                const start = performance.now();
+                Module.ccall(
+                    'sepia_filter',
+                    null,
+                    ['number', 'number', 'number'],
+                    [buffer, img.width, img.height]
+                );
+                
+                const result = new Uint8ClampedArray(
+                    Module.HEAPU8.buffer,
+                    buffer,
+                    imageData.data.length
+                );
+                
+                ctxWASM.putImageData(new ImageData(result, img.width, img.height), 0, 0);
+                return { time: performance.now() - start };
+            } finally {
+                Module._free(buffer);
+            }
+        }
+    </script>
+</body>
+</html>
